@@ -1,0 +1,6 @@
+flask
+flask-cors
+flyr
+pillow
+numpy
+werkzeug

@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>FLIR Thermal Inspector</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+  <style>
+    body,
+    html {
+      height: 100%;
+      margin: 0;
+    }
+
+    #sidebar {
+      height: 100vh;
+      overflow-y: auto;
+      border-right: 1px solid #444;
+    }
+
+    #imageCanvas {
+      border: 2px solid #888;
+      background: #222;
+      max-width: 100%;
+      max-height: 480px;
+      cursor: crosshair;
+    }
+
+    .image-thumb {
+      width: 60px;
+      height: 60px;
+      object-fit: cover;
+      margin: 2px;
+      border: 2px solid #444;
+      cursor: pointer;
+    }
+
+    .image-thumb.selected {
+      border-color: #0dcaf0;
+    }
+
+    #toolbar button {
+      margin-right: 5px;
+    }
+
+    .stats-table {
+      background: #222;
+      color: #fff;
+    }
+  </style>
+</head>
+
+<body class="bg-dark text-white">
+  <div class="container-fluid">
+    <div class="row">
+      <!-- Sidebar -->
+      <div class="col-md-3 d-flex flex-column p-3" id="sidebar">
+        <h4>Mode</h4>
+        <div class="btn-group mb-3" role="group" aria-label="Mode toggle">
+          <button type="button" class="btn btn-outline-info active" id="singleModeBtn">Single Image</button>
+          <button type="button" class="btn btn-outline-info" id="batchModeBtn">Batch Images</button>
+        </div>
+
+        <!-- Single Image Upload -->
+        <div id="singleUploadArea">
+          <label class="form-label">Upload Image</label>
+          <input type="file" class="form-control mb-2" id="singleUpload" accept=".jpg,.jpeg,.png,.tiff,.tif" />
+          <label class="form-label">Unit</label>
+          <select class="form-select mb-3" id="singleUnitSelect">
+            <option value="celsius">Celsius (°C)</option>
+            <option value="fahrenheit">Fahrenheit (°F)</option>
+          </select>
+          <button class="btn btn-primary mb-3" id="analyzeSingleBtn" disabled>Analyze ROI</button>
+          <button class="btn btn-info mb-3" id="downloadPalettedSingleBtn" style="display:none;">Download Paletted Image</button>
+          <button class="btn btn-success mb-3" id="downloadCsvBtn" disabled>Download CSV</button>
+        </div>
+
+        <!-- Batch Image Upload -->
+        <div id="batchUploadArea" style="display:none;">
+          <label class="form-label">Upload Images</label>
+          <input type="file" class="form-control mb-2" id="batchUpload" multiple accept=".jpg,.jpeg,.png,.tiff,.tif" />
+          <label class="form-label">Unit</label>
+          <select class="form-select mb-3" id="batchUnitSelect">
+            <option value="celsius">Celsius (°C)</option>
+            <option value="fahrenheit">Fahrenheit (°F)</option>
+          </select>
+          <div id="batchImageList" class="d-flex flex-wrap mb-3" style="max-height: 200px; overflow-y: auto;"></div>
+          <button class="btn btn-primary mb-3" id="analyzeBatchBtn" disabled>Analyze Selected Image ROI</button>
+          <button class="btn btn-primary mb-3" id="analyzeAllBatchBtn" disabled>Analyze All</button>
+          <button class="btn btn-info mb-3" id="downloadPalettedBatchBtn" disabled>Download All Paletted Images (ZIP)</button>
+          <button class="btn btn-success mb-3" id="downloadCsvBtnBatch" disabled>Download CSV</button>
+        </div>
+      </div>
+
+      <!-- Main Content -->
+      <div class="col-md-6 d-flex flex-column p-3">
+        <div id="toolbar" class="mb-2">
+          <button class="btn btn-outline-light" id="rectToolBtn" title="Rectangle ROI">▭ Rectangle</button>
+        </div>
+        <canvas id="imageCanvas" width="640" height="480"></canvas>
+      </div>
+
+      <!-- Right Panel with Stats -->
+      <div class="col-md-3 p-3">
+        <h4>Image Temperature Stats</h4>
+        <table class="table table-sm stats-table">
+          <tbody>
+            <tr><td>Max</td><td id="imgMaxTemp">-</td></tr>
+            <tr><td>Min</td><td id="imgMinTemp">-</td></tr>
+            <tr><td>Avg</td><td id="imgAvgTemp">-</td></tr>
+          </tbody>
+        </table>
+
+        <h4>ROI Temperature Stats (Bx1)</h4>
+        <table class="table table-sm stats-table">
+          <tbody>
+            <tr><td>Max</td><td id="roiMaxTemp">-</td></tr>
+            <tr><td>Min</td><td id="roiMinTemp">-</td></tr>
+            <tr><td>Avg</td><td id="roiAvgTemp">-</td></tr>
+            <tr><td>Emissivity</td><td id="emissivity">0.95</td></tr>
+            <tr><td>Hotspot Status</td><td id="hotspotStatus">Not Found</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Element references
+    const singleModeBtn = document.getElementById('singleModeBtn');
+    const batchModeBtn = document.getElementById('batchModeBtn');
+    const singleUploadArea = document.getElementById('singleUploadArea');
+    const batchUploadArea = document.getElementById('batchUploadArea');
+    const singleUpload = document.getElementById('singleUpload');
+    const batchUpload = document.getElementById('batchUpload');
+    const batchImageList = document.getElementById('batchImageList');
+    const analyzeSingleBtn = document.getElementById('analyzeSingleBtn');
+    const analyzeBatchBtn = document.getElementById('analyzeBatchBtn');
+    const analyzeAllBatchBtn = document.getElementById('analyzeAllBatchBtn');
+    const downloadCsvBtn = document.getElementById('downloadCsvBtn');
+    const downloadCsvBtnBatch = document.getElementById('downloadCsvBtnBatch');
+    const downloadPalettedSingleBtn = document.getElementById('downloadPalettedSingleBtn');
+    const downloadPalettedBatchBtn = document.getElementById('downloadPalettedBatchBtn');
+    const imageCanvas = document.getElementById('imageCanvas');
+    const ctx = imageCanvas.getContext('2d');
+
+    const imgMaxTemp = document.getElementById('imgMaxTemp');
+    const imgMinTemp = document.getElementById('imgMinTemp');
+    const imgAvgTemp = document.getElementById('imgAvgTemp');
+    const roiMaxTemp = document.getElementById('roiMaxTemp');
+    const roiMinTemp = document.getElementById('roiMinTemp');
+    const roiAvgTemp = document.getElementById('roiAvgTemp');
+    const emissivityField = document.getElementById('emissivity');
+    const hotspotStatusField = document.getElementById('hotspotStatus');
+
+    const singleUnitSelect = document.getElementById('singleUnitSelect');
+    const batchUnitSelect = document.getElementById('batchUnitSelect');
+
+    let mode = 'single';
+    let start = null;
+    let end = null;
+    let drawing = false;
+    let currentImage = null;
+    let currentFile = null;
+    let batchFiles = [];
+    let selectedBatchIndex = 0;
+    let currentAnalysisData = null;
+
+    // Mode switching handlers
+    singleModeBtn.onclick = () => {
+      mode = 'single';
+      singleModeBtn.classList.add('active');
+      batchModeBtn.classList.remove('active');
+      singleUploadArea.style.display = 'block';
+      batchUploadArea.style.display = 'none';
+      resetState();
+    };
+
+    batchModeBtn.onclick = () => {
+      mode = 'batch';
+      batchModeBtn.classList.add('active');
+      singleModeBtn.classList.remove('active');
+      singleUploadArea.style.display = 'none';
+      batchUploadArea.style.display = 'block';
+      resetState();
+    };
+
+    // Reset UI and variables
+    function resetState() {
+      currentImage = null;
+      currentFile = null;
+      batchFiles = [];
+      selectedBatchIndex = 0;
+      start = null;
+      end = null;
+      drawing = false;
+      currentAnalysisData = null;
+      ctx.clearRect(0, 0, imageCanvas.width, imageCanvas.height);
+      clearStats();
+      analyzeSingleBtn.disabled = true;
+      analyzeBatchBtn.disabled = true;
+      analyzeAllBatchBtn.disabled = true;
+      downloadCsvBtn.disabled = true;
+      downloadCsvBtnBatch.disabled = true;
+      downloadPalettedSingleBtn.style.display = 'none';
+      downloadPalettedBatchBtn.disabled = true;
+      batchImageList.innerHTML = '';
+    }
+
+    // Clear stats display
+    function clearStats() {
+      imgMaxTemp.textContent = '-';
+      imgMinTemp.textContent = '-';
+      imgAvgTemp.textContent = '-';
+      roiMaxTemp.textContent = '-';
+      roiMinTemp.textContent = '-';
+      roiAvgTemp.textContent = '-';
+      emissivityField.textContent = '0.95';
+      hotspotStatusField.textContent = 'Not Found';
+    }
+
+    // Single image upload handler
+    singleUpload.onchange = () => {
+      if (singleUpload.files.length === 0) return;
+      currentFile = singleUpload.files[0];
+      loadImageToCanvas(currentFile);
+      analyzeSingleBtn.disabled = false;
+      clearStats();
+    };
+
+    // Batch image upload handler
+    batchUpload.onchange = () => {
+      batchFiles = Array.from(batchUpload.files);
+      if (batchFiles.length === 0) return;
+      batchImageList.innerHTML = '';
+      batchFiles.forEach((file, i) => {
+        const thumb = document.createElement('img');
+        thumb.className = 'image-thumb';
+        thumb.title = file.name;
+        thumb.src = URL.createObjectURL(file);
+        if (i === 0) thumb.classList.add('selected');
+        thumb.onclick = () => selectBatchImage(i);
+        batchImageList.appendChild(thumb);
+      });
+      selectBatchImage(0);
+      analyzeBatchBtn.disabled = false;
+      analyzeAllBatchBtn.disabled = false;
+      downloadPalettedBatchBtn.disabled = false;
+      downloadCsvBtnBatch.disabled = true;
+    };
+
+    // Load image preview to canvas
+    function loadImageToCanvas(file) {
+      const reader = new FileReader();
+      reader.onload = e => {
+        const img = new Image();
+        img.onload = () => {
+          currentImage = img;
+          drawCanvas();
+        };
+        img.src = e.target.result;
+      };
+      reader.readAsDataURL(file);
+    }
+
+    // Select batch image preview
+    function selectBatchImage(index) {
+      if (index < 0 || index >= batchFiles.length) return;
+      selectedBatchIndex = index;
+      Array.from(batchImageList.children).forEach((el, i) => {
+        el.classList.toggle('selected', i === index);
+      });
+      loadImageToCanvas(batchFiles[index]);
+      clearStats();
+    }
+
+    // ROI drawing handlers
+    imageCanvas.onmousedown = e => {
+      if (!currentImage) return;
+      drawing = true;
+      const rect = imageCanvas.getBoundingClientRect();
+      start = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+      end = null;
+    };
+
+    imageCanvas.onmousemove = e => {
+      if (!drawing) return;
+      const rect = imageCanvas.getBoundingClientRect();
+      end = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+      drawCanvas();
+    };
+
+    imageCanvas.onmouseup = () => {
+      drawing = false;
+      drawCanvas();
+    };
+
+    // Draw image and ROI rectangle on canvas
+    function drawCanvas() {
+      if (!currentImage) {
+        ctx.clearRect(0, 0, imageCanvas.width, imageCanvas.height);
+        return;
+      }
+      ctx.clearRect(0, 0, imageCanvas.width, imageCanvas.height);
+      ctx.drawImage(currentImage, 0, 0, imageCanvas.width, imageCanvas.height);
+      if (start && end) {
+        ctx.strokeStyle = '#CCCCCC';
+        ctx.lineWidth = 3;
+        const rectX = start.x;
+        const rectY = start.y;
+        const rectW = end.x - start.x;
+        const rectH = end.y - start.y;
+        ctx.strokeRect(rectX, rectY, rectW, rectH);
+      }
+    }
+
+    // Convert canvas coords to image coords
+    function convertCoords(x, y) {
+      return {
+        x: Math.round(x * (currentImage.width / imageCanvas.width)),
+        y: Math.round(y * (currentImage.height / imageCanvas.height))
+      };
+    }
+
+    // Analyze single or batch selected image
+    async function analyzeImage(isBatch = false) {
+      if (!currentImage) {
+        alert('Please upload and select an image first.');
+        return;
+      }
+      if (!start || !end) {
+        alert('Please draw an ROI on the image.');
+        return;
+      }
+      const startCoords = convertCoords(start.x, start.y);
+      const endCoords = convertCoords(end.x, end.y);
+      const roiCoords = [startCoords.x, startCoords.y, endCoords.x, endCoords.y];
+
+      const formData = new FormData();
+      let file;
+      let unit;
+      if (isBatch) {
+        file = batchFiles[selectedBatchIndex];
+        unit = batchUnitSelect.value;
+      } else {
+        file = currentFile;
+        unit = singleUnitSelect.value;
+      }
+      formData.append('image', file);
+      formData.append('roi_coords', roiCoords.join(','));
+      formData.append('unit', unit);
+
+      try {
+        const res = await fetch('/upload', {
+          method: 'POST',
+          body: formData
+        });
+        const text = await res.text();
+        let data;
+        try {
+          data = JSON.parse(text);
+        } catch {
+          alert('Invalid response from server:\n' + text);
+          return;
+        }
+        if (data.error) {
+          alert('Error: ' + data.error);
+          return;
+        }
+        currentAnalysisData = data;
+        updateStats(data);
+        if (isBatch) {
+          downloadCsvBtnBatch.disabled = false;
+        } else {
+          downloadCsvBtn.disabled = false;
+          downloadPalettedSingleBtn.style.display = 'inline-block';
+          // Show paletted image
+          const palettedImg = new Image();
+          palettedImg.onload = () => {
+            currentImage = palettedImg;
+            drawCanvas();
+          };
+          palettedImg.src = data.paletted_image_url + '?t=' + new Date().getTime();
+        }
+      } catch (err) {
+        alert('Error: ' + err.message);
+      }
+    }
+
+    // Analyze all batch images with current ROI
+    analyzeAllBatchBtn.onclick = async () => {
+      if (!start || !end) {
+        alert('Please draw an ROI on the image before analyzing all.');
+        return;
+      }
+      if (batchFiles.length === 0) {
+        alert('No batch images to analyze.');
+        return;
+      }
+      const startCoords = convertCoords(start.x, start.y);
+      const endCoords = convertCoords(end.x, end.y);
+      const roiCoords = [startCoords.x, startCoords.y, endCoords.x, endCoords.y];
+
+      const formData = new FormData();
+      batchFiles.forEach(file => formData.append('images', file));
+      formData.append('roi_coords', roiCoords.join(','));
+      formData.append('unit', batchUnitSelect.value);
+
+      try {
+        const res = await fetch('/analyze_all_batch', { method: 'POST', body: formData });
+        const results = await res.json();
+        if (results.error) {
+          alert(results.error);
+          return;
+        }
+        alert(`Batch analysis complete for ${results.length} images.`);
+        downloadCsvBtnBatch.disabled = false;
+
+        // Show paletted thumbnails for batch images
+        batchImageList.innerHTML = '';
+        results.forEach((item, i) => {
+          const thumb = document.createElement('img');
+          thumb.className = 'image-thumb';
+          thumb.title = item.filename;
+          thumb.src = item.paletted_image_url + '?t=' + new Date().getTime();
+          thumb.onclick = () => {
+            const img = new Image();
+            img.onload = () => {
+              currentImage = img;
+              drawCanvas();
+              clearStats();
+              updateStats(item);
+            };
+            img.src = item.paletted_image_url + '?t=' + new Date().getTime();
+          };
+          batchImageList.appendChild(thumb);
+        });
+
+        // Auto-select first paletted image preview
+        if (results.length > 0) {
+          const firstImg = new Image();
+          firstImg.onload = () => {
+            currentImage = firstImg;
+            drawCanvas();
+            clearStats();
+            updateStats(results[0]);
+          };
+          firstImg.src = results[0].paletted_image_url + '?t=' + new Date().getTime();
+        }
+
+      } catch (err) {
+        alert('Error analyzing batch: ' + err.message);
+      }
+    };
+
+    // Button click handlers
+    analyzeSingleBtn.onclick = () => analyzeImage(false);
+    analyzeBatchBtn.onclick = () => analyzeImage(true);
+    downloadCsvBtn.onclick = () => window.open('/download_csv', '_blank');
+    downloadCsvBtnBatch.onclick = () => window.open('/download_csv', '_blank');
+    downloadPalettedSingleBtn.onclick = () => {
+      if (!currentAnalysisData || !currentAnalysisData.paletted_image_url) {
+        alert('No paletted image available to download.');
+        return;
+      }
+      window.open(currentAnalysisData.paletted_image_url, '_blank');
+    };
+    downloadPalettedBatchBtn.onclick = () => window.open('/download_paletted_zip', '_blank');
+
+    // Initialize UI in single mode
+    singleModeBtn.click();
+
+    // Update stats display
+    function updateStats(data) {
+      imgMaxTemp.textContent = data.max_temp_img !== null ? data.max_temp_img.toFixed(2) + ' ' + data.unit : '-';
+      imgMinTemp.textContent = data.min_temp_img !== null ? data.min_temp_img.toFixed(2) + ' ' + data.unit : '-';
+      imgAvgTemp.textContent = data.avg_temp_img !== null ? data.avg_temp_img.toFixed(2) + ' ' + data.unit : '-';
+
+      roiMaxTemp.textContent = data.max_temp_roi !== null ? data.max_temp_roi.toFixed(2) + ' ' + data.unit : '-';
+      roiMinTemp.textContent = data.min_temp_roi !== null ? data.min_temp_roi.toFixed(2) + ' ' + data.unit : '-';
+      roiAvgTemp.textContent = data.avg_temp_roi !== null ? data.avg_temp_roi.toFixed(2) + ' ' + data.unit : '-';
+
+      emissivityField.textContent = data.metadata.emissivity || '0.95';
+
+      hotspotStatusField.textContent = data.hotspot_status || 'Not Found';
+    }
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+
+</html>
